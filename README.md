@@ -29,3 +29,5 @@ Run the following command to start the MLflow server before running the experime
 conda activate mds-research-stay
 mlflow server --host 127.0.0.1 --port 8080
 ```
+
+Open your browser and go to `http://127.0.0.1:8080`
