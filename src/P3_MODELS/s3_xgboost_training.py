@@ -36,6 +36,12 @@ DIR_RESULTS = '../../results'
 DIR_MODELS = '../../models'
 FILE_PROPERTIES = f"{DIR_DATA}/clean/properties_shif.parquet"
 
+warnings.filterwarnings(
+    "ignore",
+    message="Hint: Inferred schema contains integer column",
+    module="mlflow.types.utils"
+)
+
 
 # Functions
 # configs
@@ -111,6 +117,10 @@ def read_data(file, config):
                 x['conservation_status_id'].replace({7: 3.5}).astype(int),
             is_renovated=lambda x:
                 np.where(x['conservation_status_id'].ge(7), 'renovated', 'not_renovated'),
+            is_apartment=lambda x:
+                np.where(x['property_type_id'].ge(4), 1, 0),
+            has_elevator=lambda x:
+                np.where(x['elevator_service_id'].eq(1), 1, 0),
         )
         .assign(
             is_new=lambda x: x['is_new'].astype('category'),
@@ -401,14 +411,8 @@ def split_randomly_data(X, y, config, categorical_features=None):
     # For XGBoost, we need to encode categorical features
     X_encoded = X.copy()
     
-    # Convert categorical features to numeric using one-hot encoding
-    if categorical_features:
-        for col in categorical_features:
-            if col in X_encoded.columns:
-                # Get dummies for each categorical feature and prefix with column name
-                dummies = pd.get_dummies(X_encoded[col], prefix=col, drop_first=False)
-                # Drop the original column and join the dummies
-                X_encoded = X_encoded.drop(col, axis=1).join(dummies)
+    # Convert categorical features to category dtype if not already
+    X_encoded[categorical_features] = X_encoded[categorical_features].astype('category')
 
     # Split train and test
     stratify_col = X[config['stratify']] if config.get('stratify') else None
@@ -444,6 +448,31 @@ def split_randomly_data(X, y, config, categorical_features=None):
     }
 
 
+def make_monotone_constraints(dmatrix: xgb.DMatrix,
+                              constraints_by_name: dict[str, int],
+                              default: int = 0,
+                              ignore_unknown: bool = False) -> str:
+    """
+    Build the monotone_constraints string for xgb.train from a {feature_name: -1|0|1} dict.
+
+    -1 => prediction must be non-increasing w.r.t. the feature
+     0 => no constraint (default)
+     1 => prediction must be non-decreasing w.r.t. the feature
+    """
+    valid = {-1, 0, 1}
+    for k, v in constraints_by_name.items():
+        if v not in valid:
+            raise ValueError(f"Constraint for '{k}' must be one of {-1,0,1}, got {v}.")
+
+    feat_names = dmatrix.feature_names
+    unknown = set(constraints_by_name).difference(feat_names or [])
+    if unknown and not ignore_unknown:
+        raise KeyError(f"Unknown features in constraints: {sorted(unknown)}")
+
+    vec = [constraints_by_name.get(f, default) for f in feat_names]
+    return "(" + ",".join(str(v) for v in vec) + ")"
+
+
 # train model
 def train_xgboost_model(data_dict, config):
     """
@@ -459,6 +488,16 @@ def train_xgboost_model(data_dict, config):
     # Initialize XGBoost model
     params = config['hyperparameters'].copy()
     training_params = config['training'].copy()
+
+    # Get monotone constraints if specified
+    if 'monotone_constraints' in params:
+        constraints = params.pop('monotone_constraints')
+        params['monotone_constraints'] = make_monotone_constraints(
+            data_dict['train'],
+            constraints_by_name=constraints,
+            default=0,
+            ignore_unknown=True
+        )
 
     # Set up early stopping if validation set is provided
     if data_dict['validation'] is not None:
@@ -738,19 +777,10 @@ def create_mlflow_dicts(config_model, tbl, pools):
 
 
 def save_to_mlflow(
-        dict_params, dict_metrics, dict_tags, figs, model, X_sample, y_sample
+        dict_params, dict_metrics, dict_tags, figs, model, transformer, X_sample, y_sample
         ):
     """
-    Save model parameters, metrics, tags, plots, and the model itself to MLFlow.
-
-    Args:
-        dict_params (dict): Model parameters to log.
-        dict_metrics (dict): Model metrics to log.
-        dict_tags (dict): Tags to set in MLFlow.
-        figs (dict): Dictionary of matplotlib figures to log as artifacts.
-        model (XGBoostRegressor): Trained XGBoost model.
-        X_sample (pd.DataFrame): Sample of features for signature inference.
-        y_sample (pd.Series): Sample of target values for signature inference.
+    Save model parameters, metrics, tags, plots, transformer, and the model itself to MLflow.
     """
     with mlflow.start_run():
         # Log parameters
@@ -765,6 +795,15 @@ def save_to_mlflow(
         # Log figures
         for fig_name, fig in figs.items():
             mlflow.log_figure(fig, f"{fig_name}.png")
+
+        # Save and log the transformer
+        transformer_path = "feature_transformer.joblib"
+        joblib.dump(transformer, transformer_path)
+        mlflow.log_artifact(transformer_path, artifact_path="preprocessor")
+        
+        # Clean up local file
+        import os
+        os.remove(transformer_path)
 
         # Log the model
         signature = infer_signature(X_sample, y_sample)
@@ -804,7 +843,7 @@ def main():
     del X, y
 
     # S4: Train XGBoost model
-    logger.info("Training XGBoost model...")
+    logger.info("Training XGBoost model...")    
     model = train_xgboost_model(pools, config_model)
 
     # S5: Calculate metrics
@@ -847,7 +886,7 @@ def main():
 
     save_to_mlflow(
         dict_params, dict_metrics, dict_tags, figs,
-        model, X_transformed.sample(100), y_pred_test
+        model, transformer, X_transformed.sample(100), y_pred_test
     )
 
     logger.info("All done!")

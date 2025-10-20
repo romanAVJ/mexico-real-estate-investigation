@@ -1,6 +1,6 @@
 model:
   model_name: xgboost
-  purpose: hyperopt
+  purpose: counterfactual
   hyperparameters:
     objective: reg:squarederror
     eval_metric: mae
@@ -11,34 +11,35 @@ model:
     seed: 42
     lambda: 10
     subsample: 1
+    monotone_constraints:
+      age_in_months: -1
+      parking_lots: 1
+      land_area: 1
   training:
     num_boost_round: 1000
     early_stopping_rounds: 25
     verbose_eval: 50
   data:
     split_type: random
-    train_size: 0.8
+    train_size: 0.95
     validation_size: 0.1
-    stratify: property_type_id
+    stratify: is_apartment
     best_percentage: 0.99
-    # n_rows: 10000
+    # n_rows: 100000
   target: 
     ppsm_saleable: log
   features:
     # controls
       half_bathrooms: identity
       full_bathrooms: identity
-      remaining_useful_life: identity
+      age_in_months: identity
       saleable_area: identity
       land_area: identity
-      property_type_id: identity
+      is_apartment: identity
       parking_lots: identity
       # time
       quarters_since_first_appraisal: identity
       # space
-      # hex_longitude: identity
-      # hex_latitude: identity
-      # ppsm_terrain: identity
       hex_embedding_1_d16_v2: identity
       hex_embedding_2_d16_v2: identity
       hex_embedding_3_d16_v2: identity
@@ -67,7 +68,7 @@ categorical_recasters:
     2: 'not_exist'
     3: 'not_exist'
   elevator_service_id:
-    0: 'does_not_apply'
+    0: 'not_exist'
     1: 'exists'
     2: 'not_exist'
   lighting_service_id:
@@ -93,7 +94,7 @@ categorical_recasters:
     5: 'rural'
   property_type_id:
     2: 'house'
-    3: 'house_on_condominium'
+    3: 'house_in_condominium'
     4: 'apartment'
   telephone_service_supply_id:
     0: 'does_not_apply'

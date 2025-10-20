@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=UserWarning, module="xgboost")
 warnings.filterwarnings("ignore", category=FutureWarning, module="xgboost")
 warnings.filterwarnings("ignore", category=UserWarning, module="mlflow.xgboost")
+warnings.filterwarnings(
+    "ignore",
+    message="Hint: Inferred schema contains integer column",
+    module="mlflow.types.utils"
+)
 
 # Optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -409,13 +414,7 @@ def split_randomly_data(X, y, config, categorical_features=None):
     X_encoded = X.copy()
 
     # Convert categorical features to numeric using one-hot encoding
-    if categorical_features:
-        for col in categorical_features:
-            if col in X_encoded.columns:
-                # Get dummies for each categorical feature and prefix with column name
-                dummies = pd.get_dummies(X_encoded[col], prefix=col, drop_first=False)
-                # Drop the original column and join the dummies
-                X_encoded = X_encoded.drop(col, axis=1).join(dummies)
+    X_encoded[categorical_features] = X_encoded[categorical_features].astype('category')
 
     # Split train and test
     stratify_col = X[config['stratify']] if config.get('stratify') else None
@@ -450,6 +449,31 @@ def split_randomly_data(X, y, config, categorical_features=None):
         'test': dtest,
         'mini_test': X_test.sample(100, random_state=42),
     }
+
+
+def make_monotone_constraints(dmatrix: xgb.DMatrix,
+                              constraints_by_name: dict[str, int],
+                              default: int = 0,
+                              ignore_unknown: bool = False) -> str:
+    """
+    Build the monotone_constraints string for xgb.train from a {feature_name: -1|0|1} dict.
+
+    -1 => prediction must be non-increasing w.r.t. the feature
+     0 => no constraint (default)
+     1 => prediction must be non-decreasing w.r.t. the feature
+    """
+    valid = {-1, 0, 1}
+    for k, v in constraints_by_name.items():
+        if v not in valid:
+            raise ValueError(f"Constraint for '{k}' must be one of {-1,0,1}, got {v}.")
+
+    feat_names = dmatrix.feature_names
+    unknown = set(constraints_by_name).difference(feat_names or [])
+    if unknown and not ignore_unknown:
+        raise KeyError(f"Unknown features in constraints: {sorted(unknown)}")
+
+    vec = [constraints_by_name.get(f, default) for f in feat_names]
+    return "(" + ",".join(str(v) for v in vec) + ")"
 
 
 # hyperoptimization
@@ -637,6 +661,16 @@ def main():
     )
     # delete X, y to free memory
     del X, y, X_transformed, y_transformed
+
+    # get monotone constraints if any
+    if 'monotone_constraints' in config_model['hyperparameters']:
+        constraints = config_model['hyperparameters'].pop('monotone_constraints')
+        config_model['hyperparameters']['monotone_constraints'] = make_monotone_constraints(
+            pools['train'],
+            constraints_by_name=constraints,
+            default=0,
+            ignore_unknown=True
+        )
 
     # S4: Hyperparameter tuning
     logger.info("Starting hyperparameter tuning...")

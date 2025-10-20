@@ -32,6 +32,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+warnings.filterwarnings(
+    "ignore",
+    message="Hint: Inferred schema contains integer column",
+    module="mlflow.types.utils"
+)
+
 
 # Utility functions
 def get_configs(filepath):
@@ -104,6 +110,10 @@ def read_data(file, config):
                 x['conservation_status_id'].replace({7: 3.5}).astype(int),
             is_renovated=lambda x:
                 np.where(x['conservation_status_id'].ge(7), 'renovated', 'not_renovated'),
+            is_apartment=lambda x:
+                np.where(x['property_type_id'].ge(4), 1, 0),
+            has_elevator=lambda x:
+                np.where(x['elevator_service_id'].eq(1), 1, 0),
         )
         .assign(
             is_new=lambda x: x['is_new'].astype('category'),
@@ -417,13 +427,7 @@ def split_randomly_data(X, y, config, categorical_features=None):
     X_encoded = X.copy()
     
     # Convert categorical features to numeric using one-hot encoding
-    if categorical_features:
-        for col in categorical_features:
-            if col in X_encoded.columns:
-                # Get dummies for each categorical feature and prefix with column name
-                dummies = pd.get_dummies(X_encoded[col], prefix=col, drop_first=False)
-                # Drop the original column and join the dummies
-                X_encoded = X_encoded.drop(col, axis=1).join(dummies)
+    X_encoded[categorical_features] = X_encoded[categorical_features].astype('category')
 
     # Split train and test
     stratify_col = X[config['stratify']] if config.get('stratify') else None
@@ -506,7 +510,7 @@ def main(config_path, model_id):
     # Feature engineering
     logger.info("Applying feature engineering...")
     transformer = FeatureTransformer(config_model, recaster_mappers)
-    X_transformed, y_transformed = transformer.fit_transform(X, y)
+    X_transformed, y_transformed = transformer.fit_transform(X, y)  # not the best practice, but ok for now (!)
     logger.info(
         f"Feature engineering completed. "
         f"X shape: {X_transformed.shape}, y shape: {y_transformed.shape}"
@@ -599,7 +603,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--model-id',
         type=str,
-        default="a81c87e6bb1a40fdbc4803b8ed3eb807",
+        default="1ec464a33bdc436295dbb3c05e3c6ecb",
         help='MLflow model ID (just the run ID, not the full path)'
     )
 
